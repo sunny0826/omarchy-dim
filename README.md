@@ -258,17 +258,12 @@ touching the running shell:
 | `tests/` | `test_model.js` (node), `test_dim_usage.py` (python). |
 | `tests/render/` | Throwaway quickshell configs that load the real QML for `make probe` / `make render`. |
 
-Assets are generated, not drawn: `make assets` re-fetches
-<https://dimagent.cn/dim/logo.png> and rewrites the three files above, with the
-mark's rectangles and colours measured out of the logo. Edit the generator, not
-the assets.
+Assets are generated, not drawn: `make assets` re-runs the generator, which
+rewrites the three files above with the mark's rectangles and colours measured
+out of the source logo it names. Edit the generator, not the assets.
 
 ## Credits
 
-The Dim name and logo belong to the DimAgent project: the bar mark and the
-panel icon in `assets/` are derived by
-[`scripts/build-mark-assets`](scripts/build-mark-assets) from the published
-logo at <https://dimagent.cn/dim/logo.png> (the generator measures the mark's
-shapes and colours out of it, and is the only thing to edit if the brand
-changes). This plugin is an independent client of that project, not part of
-it, and ships under the MIT licence in [LICENSE](LICENSE).
+The Dim name and logo belong to the DimAgent project. This plugin is an
+independent client of that project, not part of it, and ships under the MIT
+licence in [LICENSE](LICENSE).
