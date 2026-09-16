@@ -1,0 +1,665 @@
+#!/usr/bin/python3
+"""Collect one DimAgent usage snapshot as JSON for the sunny0826.dim bar widget.
+
+Two halves, both of them Dim's own:
+
+  subscription  the `dim usage --json` output, which carries the plan, the
+                credit ledger, the term end (the reset) and every feature
+                allowance (web search, ...). This is the number the panel
+                headlines.
+  tokens        Dim's usage ledger, read straight out of the CLI's own
+                database (``~/.dimcode/v2/dimcode.sqlite``): per-day totals in
+                ``usage_daily_stats`` and per-run detail in ``usage_run_stats``,
+                which is what makes a per-model and per-cost breakdown
+                possible. Nothing here reads another agent's session store, so
+                a Codex or Claude session on the same machine cannot be
+                mistaken for Dim usage.
+
+The widget never talks to an API and never reads credentials: it runs the one
+command that already does. When ``dim`` is missing or the command fails this
+still prints a JSON snapshot with ``ok: false`` and the reason, so the panel
+can say what went wrong instead of sitting empty.
+
+Usage:
+  scripts/dim-usage                 # one snapshot, JSON on stdout
+  scripts/dim-usage --pretty        # indented, for humans
+  scripts/dim-usage --no-tokens     # credits only; skips the usage database
+  scripts/dim-usage --window-days 7 # shorten the local-token window
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCHEMA_VERSION = 1
+
+DEFAULT_DIM_TIMEOUT_SECONDS = 30
+DEFAULT_WINDOW_DAYS = 30
+RECENT_DAY_COUNT = 7
+
+USAGE_DB_NAME = "dimcode.sqlite"
+
+FEATURE_LABELS = {
+    "web_search": "Web search",
+    "web-search": "Web search",
+}
+
+DAY_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+class UsageError(Exception):
+    """A source failed in a way worth showing the user."""
+
+
+# --------------------------------------------------------------- small utils
+
+
+def number(value: Any) -> int:
+  try:
+    return max(0, round(float(value or 0)))
+  except (TypeError, ValueError):
+    return 0
+
+
+def money(value: Any) -> float:
+  try:
+    amount = float(value or 0)
+  except (TypeError, ValueError):
+    return 0.0
+  return round(amount, 6) if amount > 0 else 0.0
+
+
+def text(value: Any) -> str:
+  return "" if value is None else str(value)
+
+
+def local_day(value: Any) -> str:
+  """Local calendar day for an ISO timestamp, epoch value, or file mtime."""
+  fallback = datetime.now().strftime("%Y-%m-%d")
+  if value is None:
+    return fallback
+  if isinstance(value, (int, float)):
+    if value > 10_000_000_000:  # milliseconds
+      value = value / 1000
+    try:
+      return datetime.fromtimestamp(value).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+      return fallback
+  raw = str(value)
+  try:
+    parsed = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+  except ValueError:
+    # A leading date is good enough; anything else falls back to today.
+    return raw[:10] if DAY_PREFIX.match(raw) else fallback
+  if parsed.tzinfo is not None:
+    parsed = parsed.astimezone()
+  return parsed.strftime("%Y-%m-%d")
+
+
+def day_sequence(days: int) -> list[str]:
+  """The last `days` local dates, oldest first, ending today."""
+  from datetime import timedelta
+
+  today = datetime.now().date()
+  return [(today - timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+
+
+def now_iso() -> str:
+  return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+# ------------------------------------------------------------- dim discovery
+
+
+def candidate_dim_paths() -> list[Path]:
+  home = Path.home()
+  paths: list[Path] = []
+  found = shutil.which("dim")
+  if found:
+    paths.append(Path(found))
+  paths.append(home / ".local" / "share" / "mise" / "shims" / "dim")
+  for installs in (home / ".local" / "share" / "mise" / "installs").glob("node/*/bin/dim"):
+    paths.append(installs)
+  paths.extend([
+    home / ".local" / "bin" / "dim",
+    home / ".npm-global" / "bin" / "dim",
+    home / "node_modules" / ".bin" / "dim",
+    Path("/usr/local/bin/dim"),
+    Path("/usr/bin/dim"),
+    Path("/opt/homebrew/bin/dim"),
+  ])
+  return paths
+
+
+def resolve_dim(override_path: str = "") -> tuple[str, str]:
+  """(absolute path to the Dim CLI, error). Path is "" when it is unusable.
+
+  The shell that hosts the bar does not necessarily inherit the interactive
+  PATH (mise installs `dim` under a versioned node prefix), so PATH is only
+  the first of several candidates. An explicit override (--dim-bin, then
+  DIM_BIN) wins over every one of them, and a bad override is reported
+  instead of quietly falling back.
+  """
+  override = override_path or os.environ.get("DIM_BIN") or os.environ.get("OMARCHY_DIM_BIN")
+  if override:
+    path = Path(override)
+    try:
+      if path.is_file() and os.access(path, os.X_OK):
+        return str(path), ""
+    except OSError:
+      pass
+    return "", f"dim binary {override} is not an executable file"
+
+  seen: set[str] = set()
+  for path in candidate_dim_paths():
+    key = str(path)
+    if key in seen:
+      continue
+    seen.add(key)
+    try:
+      if path.is_file() and os.access(path, os.X_OK):
+        return str(path), ""
+    except OSError:
+      continue
+  return "", ""
+
+
+def dim_env(dim_path: str) -> dict[str, str]:
+  """Environment that lets a resolved `dim` run its own node shebang."""
+  env = dict(os.environ)
+  prefix: list[str] = []
+  if dim_path:
+    prefix.append(str(Path(dim_path).parent))
+  home = Path.home()
+  for node_bin in sorted((home / ".local" / "share" / "mise" / "installs").glob("node/*/bin")):
+    prefix.append(str(node_bin))
+  prefix.append(str(home / ".local" / "share" / "mise" / "shims"))
+  if prefix:
+    env["PATH"] = ":".join(prefix + [env.get("PATH", "")])
+  return env
+
+
+# -------------------------------------------------------------- subscription
+
+
+def read_json_string(value: Any) -> dict[str, Any]:
+  """Parse a JSON payload that the API ships as an escaped string."""
+  if isinstance(value, dict):
+    return value
+  if not isinstance(value, str) or not value.strip():
+    return {}
+  try:
+    parsed = json.loads(value)
+  except ValueError:
+    return {}
+  return parsed if isinstance(parsed, dict) else {}
+
+
+def normalize_plan(subscription: dict[str, Any]) -> dict[str, Any]:
+  product = subscription.get("product") or {}
+  price = subscription.get("price") or {}
+  return {
+    "name": text(product.get("name")),
+    "description": text(product.get("description")),
+    "type": text(product.get("product_type")),
+    "priceAmount": number(price.get("amount")),
+    "currency": text(price.get("currency")),
+    "interval": text(price.get("billing_interval")),
+    "provider": text(price.get("provider")),
+  }
+
+
+def normalize_credits(payload: dict[str, Any], term: dict[str, Any]) -> dict[str, Any]:
+  credits = payload.get("credits") or {}
+  bucket = credits.get("subscription_bucket") or {}
+  total = number(credits.get("total_units", bucket.get("total_units")))
+  used = number(credits.get("used_units", bucket.get("used_units")))
+  remaining = number(credits.get("remaining_units", bucket.get("remaining_units")))
+  if not total and not remaining:
+    # Nothing granted yet: fall back to whatever the term allows.
+    entitlement = read_json_string(term.get("entitlement_payload_json"))
+    total = number((entitlement.get("quota_policy") or {}).get("grant_units"))
+    remaining = total
+  addon_total = number(credits.get("addon_units"))
+  if not addon_total:
+    addon_total = sum(number(b.get("total_units")) for b in (credits.get("addon_buckets") or []))
+  if total <= 0:
+    total = used + remaining
+  remaining = max(0, min(remaining, total)) if total else remaining
+  used_fraction = (used / total) if total else 0.0
+  return {
+    "total": total,
+    "used": used,
+    "remaining": remaining,
+    "addonTotal": addon_total,
+    "usedFraction": round(used_fraction, 6),
+    "remainingFraction": round(1 - used_fraction if total else 0.0, 6),
+    "expiresAt": text(bucket.get("expires_at") or bucket.get("hard_deadline_at")),
+    "status": text(bucket.get("status")),
+  }
+
+
+def normalize_features(payload: dict[str, Any]) -> list[dict[str, Any]]:
+  features: list[dict[str, Any]] = []
+  for meter in payload.get("feature_meters") or []:
+    if not isinstance(meter, dict):
+      continue
+    key = text(meter.get("feature_key"))
+    if not key:
+      continue
+    allowance = number(meter.get("total_allowance"))
+    used = number(meter.get("total_used"))
+    remaining = number(meter.get("total_remaining"))
+    features.append({
+      "key": key,
+      "label": FEATURE_LABELS.get(key, key.replace("_", " ").replace("-", " ").title()),
+      "unit": text(meter.get("unit")),
+      "allowance": allowance,
+      "used": used,
+      "remaining": remaining,
+      "unlimited": bool(meter.get("unlimited")),
+      "usedFraction": round((used / allowance), 6) if allowance else 0.0,
+      "periodEnd": text(meter.get("period_end")),
+    })
+  features.sort(key=lambda f: f["key"])
+  return features
+
+
+def normalize_models(term: dict[str, Any]) -> dict[str, Any]:
+  payload = read_json_string(term.get("entitlement_payload_json"))
+  names: list[str] = []
+  for entry in payload.get("model_access") or []:
+    if not isinstance(entry, dict):
+      continue
+    config = entry.get("config") if isinstance(entry.get("config"), dict) else {}
+    label = text(config.get("displayName") or config.get("name") or entry.get("model"))
+    if label and label not in names:
+      names.append(label)
+  return {
+    "count": len(names),
+    "names": names,
+    "remoteControlEnabled": bool(payload.get("remote_control_enabled")),
+  }
+
+
+def normalize_subscription(payload: dict[str, Any]) -> dict[str, Any]:
+  subscription = payload.get("subscription") or {}
+  plan = subscription.get("subscription") or {}
+  term = subscription.get("current_term") or {}
+  resets = payload.get("resets") or {}
+  window = resets.get("window") or {}
+  monthly = resets.get("monthly_full") or {}
+  config = payload.get("config") or {}
+  return {
+    "accountId": number(payload.get("account_id") or subscription.get("account_id")),
+    "subscription": {
+      "id": number(plan.get("id")),
+      "status": text(plan.get("status")),
+      "kind": text(plan.get("kind")),
+      "line": text(plan.get("line")),
+      "cancelAtPeriodEnd": bool(plan.get("cancel_at_period_end")),
+    },
+    "plan": normalize_plan(subscription),
+    "credits": normalize_credits(payload, term),
+    "term": {
+      "startAt": text(term.get("start_at")),
+      "endAt": text(term.get("end_at")),
+      "windowResetsAvailable": number(window.get("available_count")),
+      "fullResetsAvailable": number(monthly.get("available_count")),
+      "status": text(term.get("status")),
+    },
+    "features": normalize_features(payload),
+    "models": normalize_models(term),
+    "compactModel": text(config.get("compact_model")),
+  }
+
+
+def dim_timeout_seconds() -> int:
+  """How long `dim usage --json` may take before it is killed."""
+  raw = os.environ.get("DIM_TIMEOUT_SECONDS") or ""
+  try:
+    value = int(float(raw))
+  except ValueError:
+    return DEFAULT_DIM_TIMEOUT_SECONDS
+  return max(1, value) if value > 0 else DEFAULT_DIM_TIMEOUT_SECONDS
+
+
+def fetch_subscription(dim_path: str, dim_error: str = "", timeout: int = 0) -> dict[str, Any]:
+  if not dim_path:
+    raise UsageError(dim_error or "dim CLI not found")
+  limit = timeout if timeout > 0 else dim_timeout_seconds()
+  try:
+    proc = subprocess.run(
+      [dim_path, "usage", "--json"],
+      capture_output=True,
+      text=True,
+      timeout=limit,
+      env=dim_env(dim_path),
+    )
+  except subprocess.TimeoutExpired:
+    raise UsageError(f"`dim usage --json` timed out after {limit}s")
+  except OSError as exc:
+    raise UsageError(f"cannot run {dim_path}: {exc}")
+
+  stdout = proc.stdout or ""
+  if proc.returncode != 0 and not stdout.strip():
+    detail = (proc.stderr or "").strip().splitlines()
+    raise UsageError(detail[-1] if detail else f"`dim usage --json` exited {proc.returncode}")
+  try:
+    payload = json.loads(stdout)
+  except ValueError:
+    preview = stdout.strip().splitlines()
+    raise UsageError(f"`dim usage --json` did not return JSON: {(preview[0] if preview else 'no output')[:120]}")
+  if not isinstance(payload, dict):
+    raise UsageError("`dim usage --json` returned an unexpected payload")
+  return normalize_subscription(payload)
+
+
+# ------------------------------------------------------- dim's usage ledger
+#
+# Dim keeps its own accounting next to its sessions: one row per day in
+# usage_daily_stats and one per run in usage_run_stats. Reading those is both
+# more accurate than replaying any session log and unambiguous about whose
+# usage it is.
+
+
+def dim_code_home_candidates() -> list[Path]:
+  home = Path.home()
+  candidates: list[Path] = []
+  override = os.environ.get("DIMCODE_HOME") or ""
+  if override:
+    candidates.append(Path(override))
+  candidates.append(home / ".dimcode" / "v2")
+  candidates.extend(sorted((home / ".dimcode").glob("v*"), reverse=True))
+  candidates.append(home / ".dimcode")
+  return candidates
+
+
+def resolve_usage_db(override_path: str = "") -> tuple[str, str]:
+  """(path to dim's usage database, error)."""
+  candidates: list[Path] = []
+  if override_path:
+    candidates.append(Path(override_path))
+  else:
+    for root in dim_code_home_candidates():
+      candidates.append(root if root.suffix == ".sqlite" else root / USAGE_DB_NAME)
+    # Last resort: any versioned data directory under ~/.dimcode.
+    candidates.extend(sorted((Path.home() / ".dimcode").glob("*/" + USAGE_DB_NAME), reverse=True))
+
+  seen: set[str] = set()
+  for candidate in candidates:
+    key = str(candidate)
+    if key in seen:
+      continue
+    seen.add(key)
+    try:
+      if candidate.is_file():
+        return str(candidate), ""
+    except OSError:
+      continue
+  return "", "Dim's usage database was not found (looked for ~/.dimcode/v2/dimcode.sqlite)"
+
+
+def open_usage_db(path: str) -> tuple[sqlite3.Connection | None, str]:
+  """A connection that can read a database the CLI may be writing right now.
+
+  Read-only first. When the CLI holds the file in a way SQLite refuses to open
+  read-only, the database (with its write-ahead log) is copied to a temp file
+  and read there — a snapshot is enough for a display.
+  """
+  attempts: list[str] = []
+  try:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=3)
+    conn.row_factory = sqlite3.Row
+    conn.execute("select 1 from usage_daily_stats limit 1")
+    return conn, ""
+  except sqlite3.Error as exc:
+    attempts.append(str(exc))
+
+  try:
+    source = Path(path)
+    temp_dir = Path(tempfile.mkdtemp(prefix="guo-dim-usage-"))
+    for suffix in ("", "-wal", "-shm"):
+      side = Path(str(source) + suffix)
+      if side.is_file():
+        shutil.copy2(side, temp_dir / side.name)
+    conn = sqlite3.connect(str(temp_dir / source.name), timeout=3)
+    conn.row_factory = sqlite3.Row
+    conn.execute("select 1 from usage_daily_stats limit 1")
+    return conn, ""
+  except (sqlite3.Error, OSError) as exc:
+    attempts.append(str(exc))
+  return None, "; ".join(attempts)
+
+
+def parse_cost(value: Any) -> float:
+  """Run rows carry their cost as a JSON blob, when they carry it at all."""
+  if isinstance(value, dict):
+    return money(value.get("totalCostUsd"))
+  if isinstance(value, str) and value.strip().startswith("{"):
+    return money(read_json_string(value).get("totalCostUsd"))
+  return money(value)
+
+
+def read_usage_days(conn: sqlite3.Connection, days: list[str]) -> dict[str, dict[str, Any]]:
+  rows: dict[str, dict[str, Any]] = {}
+  cutoff = days[0]
+  for row in conn.execute(
+    "select day, inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheWriteTokens,"
+    " estimatedCostUsd, runCount, sessionCount, skillUseCount"
+    " from usage_daily_stats where day >= ? order by day asc",
+    (cutoff,),
+  ):
+    rows[text(row["day"])[:10]] = {
+      "date": text(row["day"])[:10],
+      "total": number(row["totalTokens"]),
+      "inputTokens": number(row["inputTokens"]),
+      "outputTokens": number(row["outputTokens"]),
+      "cacheReadTokens": number(row["cacheReadTokens"]),
+      "cacheWriteTokens": number(row["cacheWriteTokens"]),
+      "costUsd": money(row["estimatedCostUsd"]),
+      "runs": number(row["runCount"]),
+      "sessions": number(row["sessionCount"]),
+      "skills": number(row["skillUseCount"]),
+    }
+  return rows
+
+
+def empty_day(day: str) -> dict[str, Any]:
+  return {
+    "date": day,
+    "total": 0,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "costUsd": 0.0,
+    "runs": 0,
+    "sessions": 0,
+    "skills": 0,
+  }
+
+
+def read_usage_models(conn: sqlite3.Connection, cutoff: str) -> list[dict[str, Any]]:
+  """Per-model totals over the window, cache split out of the raw input count."""
+  models: dict[str, dict[str, Any]] = {}
+  for row in conn.execute(
+    "select sessionId, providerId, modelId, inputTokens, outputTokens, totalTokens,"
+    " cacheReadTokens, cacheWriteTokens, cost from usage_run_stats where endedAt >= ?",
+    (cutoff,),
+  ):
+    model = text(row["modelId"]) or "unknown"
+    bucket = models.setdefault(model, {
+      "model": model,
+      "provider": text(row["providerId"]),
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "total": 0,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "uncachedInputTokens": 0,
+      "runs": 0,
+      "costUsd": 0.0,
+      "sessions": set(),
+    })
+    cache_read = number(row["cacheReadTokens"])
+    cache_write = number(row["cacheWriteTokens"])
+    input_tokens = number(row["inputTokens"])
+    bucket["inputTokens"] += input_tokens
+    bucket["outputTokens"] += number(row["outputTokens"])
+    bucket["total"] += number(row["totalTokens"])
+    bucket["cacheReadTokens"] += cache_read
+    bucket["cacheWriteTokens"] += cache_write
+    bucket["uncachedInputTokens"] += max(0, input_tokens - cache_read - cache_write)
+    bucket["runs"] += 1
+    bucket["costUsd"] += parse_cost(row["cost"])
+    bucket["sessions"].add(text(row["sessionId"]))
+
+  out: list[dict[str, Any]] = []
+  for bucket in models.values():
+    bucket["costUsd"] = money(bucket["costUsd"])
+    bucket["sessions"] = len(bucket["sessions"])
+    out.append(bucket)
+  out.sort(key=lambda b: b["total"], reverse=True)
+  return out
+
+
+def read_usage_ledger(path: str, window_days: int) -> dict[str, Any]:
+  conn, error = open_usage_db(path)
+  if conn is None:
+    raise UsageError(f"cannot read {path}: {error}")
+
+  try:
+    days = day_sequence(max(RECENT_DAY_COUNT, window_days))
+    by_day = read_usage_days(conn, days)
+    window_days_list = days[-window_days:]
+    recent_days_list = days[-RECENT_DAY_COUNT:]
+    today = days[-1]
+
+    models = read_usage_models(conn, days[0])
+    providers: dict[str, int] = {}
+    for model in models:
+      providers[model["provider"] or "unknown"] = providers.get(model["provider"] or "unknown", 0) + model["total"]
+
+    def total_for(day_list: list[str], field: str) -> int:
+      return sum(by_day.get(day, empty_day(day))[field] for day in day_list)
+
+    def cost_for(day_list: list[str]) -> float:
+      return money(sum(by_day.get(day, empty_day(day))["costUsd"] for day in day_list))
+
+    today_row = by_day.get(today, empty_day(today))
+    window_sessions = sum(by_day.get(day, empty_day(day))["sessions"] for day in window_days_list)
+    tokens = {
+      "source": "dim",
+      "database": path,
+      "windowDays": window_days,
+      "today": today,
+      "todayTotal": today_row["total"],
+      "todayRuns": today_row["runs"],
+      "todaySessions": today_row["sessions"],
+      "todayCostUsd": today_row["costUsd"],
+      "days": [by_day.get(day, empty_day(day)) for day in recent_days_list],
+      "recentTotal": total_for(recent_days_list, "total"),
+      "recentRuns": total_for(recent_days_list, "runs"),
+      "recentCostUsd": cost_for(recent_days_list),
+      "windowTotal": total_for(window_days_list, "total"),
+      "windowRuns": total_for(window_days_list, "runs"),
+      "windowSessions": window_sessions,
+      "windowCostUsd": cost_for(window_days_list),
+      "activeDays": len([d for d in window_days_list if by_day.get(d, empty_day(d))["total"] > 0]),
+      "byModel": models,
+      "byProvider": providers,
+    }
+  finally:
+    conn.close()
+  return tokens
+
+
+# ------------------------------------------------------------------- driver
+
+
+def build_snapshot(include_tokens: bool, window_days: int, dim_override: str = "",
+                   timeout: int = 0, db_override: str = "") -> tuple[dict[str, Any], bool]:
+  dim_path, dim_error = resolve_dim(dim_override)
+  snapshot: dict[str, Any] = {
+    "schemaVersion": SCHEMA_VERSION,
+    "generatedAt": now_iso(),
+    "dimPath": dim_path,
+    "dimFound": bool(dim_path),
+    "ok": False,
+    "error": "",
+    "accountId": 0,
+    "subscription": {},
+    "plan": {},
+    "credits": {},
+    "term": {},
+    "features": [],
+    "models": {},
+    "compactModel": "",
+  }
+
+  ok = True
+  if not include_tokens:
+    snapshot["tokens"] = None
+  else:
+    db_path, db_error = resolve_usage_db(db_override)
+    if not db_path:
+      snapshot["tokens"] = None
+      snapshot["tokenError"] = db_error
+    else:
+      try:
+        snapshot["tokens"] = read_usage_ledger(db_path, window_days)
+      except (UsageError, sqlite3.Error) as exc:  # credits must still land
+        snapshot["tokens"] = None
+        snapshot["tokenError"] = str(exc)
+
+  try:
+    snapshot.update(fetch_subscription(dim_path, dim_error, timeout))
+    snapshot["ok"] = True
+  except UsageError as exc:
+    snapshot["error"] = str(exc)
+    ok = False
+
+  return snapshot, ok
+
+
+def main(argv: list[str]) -> int:
+  parser = argparse.ArgumentParser(description="Print one DimAgent usage snapshot as JSON.")
+  parser.add_argument("--pretty", action="store_true", help="indent the JSON output")
+  parser.add_argument("--no-tokens", action="store_true", help="skip Dim's local usage ledger")
+  parser.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS, metavar="DAYS",
+                      help=f"days of local token history to summarize (default {DEFAULT_WINDOW_DAYS})")
+  parser.add_argument("--dim-bin", default="", metavar="PATH",
+                      help="path to the dim CLI (overrides DIM_BIN and PATH discovery)")
+  parser.add_argument("--usage-db", default="", metavar="PATH",
+                      help="path to dim's usage database (default ~/.dimcode/v2/dimcode.sqlite)")
+  parser.add_argument("--timeout", type=int, default=0, metavar="SECONDS",
+                      help="how long `dim usage --json` may take (default 30, or DIM_TIMEOUT_SECONDS)")
+  parser.add_argument("--print-path", action="store_true", help="print the resolved paths and exit")
+  args = parser.parse_args(argv)
+
+  if args.print_path:
+    dim_path, _ = resolve_dim(args.dim_bin)
+    db_path, _ = resolve_usage_db(args.usage_db)
+    print(json.dumps({"dim": dim_path, "usageDatabase": db_path}, indent=2 if args.pretty else None))
+    return 0 if dim_path else 1
+
+  window_days = args.window_days if args.window_days > 0 else DEFAULT_WINDOW_DAYS
+  snapshot, ok = build_snapshot(not args.no_tokens, window_days, args.dim_bin, args.timeout, args.usage_db)
+  print(json.dumps(snapshot, indent=2 if args.pretty else None, ensure_ascii=False))
+  return 0 if ok else 1
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

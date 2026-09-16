@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "sunny0826.dim",
+  "name": "Dim",
+  "version": "1.0.0",
+  "author": "sunny0826",
+  "license": "MIT",
+  "description": "DimAgent subscription usage in the Omarchy bar: the plan's credit ledger, when it resets, the allowances that ride along with it, and Dim's own local usage ledger by day and model.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Dim",
+    "description": "One bar icon and one panel: credits used and left, the reset countdown, the plan's feature allowances, and local usage by day, model, and cost — all read from the dim CLI and its own database.",
+    "category": "AI",
+    "aliases": [
+      "dim",
+      "dimagent",
+      "dimcode",
+      "usage",
+      "subscription",
+      "credits",
+      "quota",
+      "tokens"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 120,
+      "barDisplay": "Remaining",
+      "barMark": "Mono",
+      "dimBinary": ""
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 120
+      },
+      {
+        "key": "barDisplay",
+        "type": "enum",
+        "label": "Bar label",
+        "options": [
+          "Remaining",
+          "Used",
+          "Icon"
+        ],
+        "defaultValue": "Remaining",
+        "description": "What the percentage next to the logo counts. Icon hides it entirely."
+      },
+      {
+        "key": "barMark",
+        "type": "enum",
+        "label": "Bar logo",
+        "options": [
+          "Mono",
+          "Color",
+          "Logo"
+        ],
+        "defaultValue": "Mono",
+        "description": "Mono: the Dim mark in the bar's own foreground colour, like every other bar icon. Color: the mark in its brand green. Logo: the full app icon."
+      },
+      {
+        "key": "dimBinary",
+        "type": "path",
+        "label": "dim binary",
+        "defaultValue": "",
+        "description": "Optional. Only needed when the shell cannot find dim on its own PATH."
+      }
+    ]
+  },
+  "homepage": "https://github.com/sunny0826/omarchy-dim",
+  "repository": "https://github.com/sunny0826/omarchy-dim"
+}

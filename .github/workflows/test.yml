@@ -1,0 +1,35 @@
+name: test
+
+# The manifest is validated by Omarchy itself on install, and qmllint needs the
+# shell's own QML kit, so this workflow covers what is portable: the collector
+# against a synthetic database, and the pure formatting and arithmetic.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Formatting and arithmetic (node)
+        run: node tests/test_model.js
+      - name: Usage collector (python)
+        run: python3 tests/test_dim_usage.py
+      - name: Manifest is valid JSON with the required fields
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          manifest = json.loads(pathlib.Path("manifest.json").read_text())
+          for key in ("schemaVersion", "id", "name", "version", "author", "license", "description", "kinds", "entryPoints"):
+            assert key in manifest, key
+          assert manifest["schemaVersion"] == 1
+          assert manifest["id"] == "sunny0826.dim"
+          for path in manifest["entryPoints"].values():
+            assert pathlib.Path(path).is_file(), path
+          print("manifest ok")
+          PY

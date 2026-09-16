@@ -1,0 +1,175 @@
+#!/usr/bin/python3
+"""Compose the market listing preview from the harness renders.
+
+`make render` draws the real QML — the bar button and the panel body — into
+~/.cache/guo-dim-check. This puts them together the way the shell shows them:
+a bar strip, the popup card below it, on the active theme's colours, and writes
+preview.png at the plugin root.
+
+The rendering is deliberately not done in QML: the grab API mixes logical and
+device units, and composing two known-good images is deterministic.
+
+Usage:
+  scripts/build-preview                       # read the default render names
+  scripts/build-preview --bar <png> --panel <png> --out <png> [--theme <dir>]
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+# The PNG reader/writer and the rounded-corner mask already exist for the logo
+# assets; importing them keeps one implementation of each.
+_loader = importlib.machinery.SourceFileLoader("dim_assets", str(PLUGIN_ROOT / "scripts" / "build-mark-assets"))
+_spec = importlib.util.spec_from_loader("dim_assets", _loader)
+assets = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(assets)
+
+PAD = 24
+BAR_STRIP = 40
+CARD_RADIUS = 12
+CARD_PAD = 14
+
+
+def theme_colors(theme_dir: Path) -> dict:
+  """background / lighter_background / popup colours from colors.toml."""
+  values = {"background": (11, 12, 22), "lighter": (21, 24, 40), "foreground": (221, 247, 255)}
+  path = theme_dir / "colors.toml"
+  if not path.is_file():
+    print(f"no theme at {path}; using fallbacks", file=sys.stderr)
+    return values
+  for line in path.read_text().splitlines():
+    if "=" not in line:
+      continue
+    key, _, raw = line.partition("=")
+    key = key.strip()
+    raw = raw.strip().strip('"')
+    if not raw.startswith("#") or len(raw) != 7:
+      continue
+    rgb = tuple(int(raw[i:i + 2], 16) for i in (1, 3, 5))
+    if key == "background":
+      values["background"] = rgb
+    elif key == "lighter_background":
+      values["lighter"] = rgb
+    elif key == "foreground":
+      values["foreground"] = rgb
+  return values
+
+
+def blend(dst, width, height, x, y, red, green, blue, alpha):
+  if alpha <= 0:
+    return
+  if x < 0 or y < 0 or x >= width or y >= height:
+    return
+  i = (y * width + x) * 4
+  a = alpha / 255.0
+  dst[i] = round(dst[i] * (1 - a) + red * a)
+  dst[i + 1] = round(dst[i + 1] * (1 - a) + green * a)
+  dst[i + 2] = round(dst[i + 2] * (1 - a) + blue * a)
+  dst[i + 3] = 255
+
+
+def inside_rounded(x, y, left, top, right, bottom, radius):
+  cx = min(max(x, left + radius), right - radius)
+  cy = min(max(y, top + radius), bottom - radius)
+  dx, dy = x - cx, y - cy
+  return dx * dx + dy * dy <= radius * radius
+
+
+def crop(width, height, pixels, pad=2):
+  """Trim fully transparent rows and columns: the renders come with margins."""
+  left, top, right, bottom = width, height, -1, -1
+  for y in range(height):
+    row = y * width * 4
+    for x in range(width):
+      if pixels[row + x * 4 + 3] > 8:
+        left = min(left, x)
+        right = max(right, x)
+        top = min(top, y)
+        bottom = max(bottom, y)
+  if right < 0:
+    return width, height, pixels
+  left, top = max(0, left - pad), max(0, top - pad)
+  right, bottom = min(width - 1, right + pad), min(height - 1, bottom + pad)
+  out_w, out_h = right - left + 1, bottom - top + 1
+  out = bytearray(out_w * out_h * 4)
+  for y in range(out_h):
+    src = ((top + y) * width + left) * 4
+    out[y * out_w * 4:(y + 1) * out_w * 4] = pixels[src:src + out_w * 4]
+  return out_w, out_h, out
+
+
+def compose(bar_path: Path, panel_path: Path, out_path: Path, theme_dir: Path) -> None:
+  colors = theme_colors(theme_dir)
+  bar_w, bar_h, bar_px = assets.read_png(bar_path)
+  panel_w, panel_h, panel_px = assets.read_png(panel_path)
+  print(f"bar {bar_w}x{bar_h}, panel {panel_w}x{panel_h}")
+  bar_w, bar_h, bar_px = crop(bar_w, bar_h, bar_px)
+  panel_w, panel_h, panel_px = crop(panel_w, panel_h, panel_px)
+  print(f"cropped bar {bar_w}x{bar_h}, panel {panel_w}x{panel_h}")
+
+  width = PAD * 2 + panel_w + CARD_PAD * 2
+  height = PAD + BAR_STRIP + PAD + panel_h + CARD_PAD * 2 + PAD
+  canvas = bytearray(width * height * 4)
+
+  # Everything outside the card and the bar strip stays transparent, so the
+  # preview drops onto whatever surface a listing renders it on.
+  card_left, card_top = PAD, PAD + BAR_STRIP + PAD
+  card_right = card_left + panel_w + CARD_PAD * 2
+  card_bottom = card_top + panel_h + CARD_PAD * 2
+
+  for y in range(height):
+    for x in range(width):
+      in_card = card_left <= x < card_right and card_top <= y < card_bottom \
+        and inside_rounded(x, y, card_left, card_top, card_right, card_bottom, CARD_RADIUS)
+      in_strip = PAD <= x < width - PAD and PAD <= y < PAD + BAR_STRIP
+      if in_card:
+        red, green, blue = colors["background"]
+      elif in_strip:
+        red, green, blue = colors["lighter"]
+      else:
+        continue
+      # A hairline between the two surfaces keeps the card readable when the
+      # theme's background and strip colours are close.
+      blend(canvas, width, height, x, y, red, green, blue, 255)
+
+  for y in range(bar_h):
+    for x in range(bar_w):
+      i = (y * bar_w + x) * 4
+      blend(canvas, width, height, PAD + CARD_PAD + x, PAD + (BAR_STRIP - bar_h) // 2 + y,
+            bar_px[i], bar_px[i + 1], bar_px[i + 2], bar_px[i + 3])
+
+  for y in range(panel_h):
+    for x in range(panel_w):
+      i = (y * panel_w + x) * 4
+      blend(canvas, width, height, card_left + x, card_top + CARD_PAD + y,
+            panel_px[i], panel_px[i + 1], panel_px[i + 2], panel_px[i + 3])
+
+  assets.write_png(out_path, width, height, canvas)
+  print(f"wrote {out_path} ({width}x{height}, {out_path.stat().st_size // 1024} KB)")
+
+
+def main(argv):
+  cache = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "guo-dim-check"
+  state = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+  parser = argparse.ArgumentParser(description="Compose the listing preview from the harness renders.")
+  parser.add_argument("--bar", default=str(cache / "bar-mono.png"), metavar="PNG")
+  parser.add_argument("--panel", default=str(cache / "panel.png"), metavar="PNG")
+  parser.add_argument("--out", default=str(PLUGIN_ROOT / "preview.png"), metavar="PNG")
+  parser.add_argument("--theme", default=str(state / "omarchy" / "current" / "theme"), metavar="DIR")
+  args = parser.parse_args(argv)
+
+  for name, path in (("--bar", args.bar), ("--panel", args.panel)):
+    if not Path(path).is_file():
+      raise SystemExit(f"{name} not found: {path} (run `make render` first)")
+  compose(Path(args.bar), Path(args.panel), Path(args.out), Path(args.theme))
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,291 @@
+#!/usr/bin/python3
+"""Derive the plugin's logo assets from the published Dim project logo.
+
+The logo belongs to the project: https://dimagent.cn/dim/logo.png. Shipping a
+1024px app icon and drawing it in a bar would be both wasteful and wrong — a
+bar mark is monochrome and sits inside the theme — so this builds the three
+assets the plugin actually uses:
+
+  dim-logo.png        the app icon, cropped to its rounded square with the
+                      page's white removed, for the panel hero
+  dim-mark-color.svg  the mark alone (the bars) in its own sampled colours
+  dim-mark.svg        the same mark in white, for the shell to tint
+
+Pure stdlib: it decodes and re-encodes the PNG itself, so it runs on a fresh
+Arch box with nothing installed.
+
+Run:
+  scripts/build-mark-assets                  # fetch the logo, rewrite assets/
+  scripts/build-mark-assets --source logo.png
+"""
+
+import argparse
+import os
+import struct
+import sys
+import urllib.request
+import zlib
+from collections import deque
+from pathlib import Path
+
+LOGO_URL = "https://dimagent.cn/dim/logo.png"
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+# ---------------------------------------------------------------------- PNG
+
+
+def read_png(path):
+  """(width, height, RGBA bytes) for an 8-bit non-interlaced RGBA PNG."""
+  data = path.read_bytes()
+  if data[:8] != b"\x89PNG\r\n\x1a\n":
+    raise SystemExit(f"{path} is not a PNG")
+  pos, idat, header = 8, b"", None
+  while pos < len(data):
+    length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+    body = data[pos + 8:pos + 8 + length]
+    pos += 12 + length
+    if kind == b"IHDR":
+      header = struct.unpack(">IIBBBBB", body)
+    elif kind == b"IDAT":
+      idat += body
+    elif kind == b"IEND":
+      break
+  if header is None:
+    raise SystemExit(f"{path} has no IHDR")
+  width, height, depth, color_type, _, _, interlace = header
+  if depth != 8 or color_type != 6 or interlace != 0:
+    raise SystemExit(f"unsupported PNG ({header}); expected 8-bit RGBA, non-interlaced")
+
+  raw = zlib.decompress(idat)
+  stride = width * 4
+  out = bytearray(stride * height)
+  prev = bytearray(stride)
+  cursor = 0
+  for y in range(height):
+    ftype = raw[cursor]
+    cursor += 1
+    line = bytearray(raw[cursor:cursor + stride])
+    cursor += stride
+    if ftype == 1:
+      for i in range(4, stride):
+        line[i] = (line[i] + line[i - 4]) & 0xFF
+    elif ftype == 2:
+      for i in range(stride):
+        line[i] = (line[i] + prev[i]) & 0xFF
+    elif ftype == 3:
+      for i in range(stride):
+        left = line[i - 4] if i >= 4 else 0
+        line[i] = (line[i] + ((left + prev[i]) >> 1)) & 0xFF
+    elif ftype == 4:
+      for i in range(stride):
+        a = line[i - 4] if i >= 4 else 0
+        b = prev[i]
+        c = prev[i - 4] if i >= 4 else 0
+        p = a + b - c
+        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+        pred = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+        line[i] = (line[i] + pred) & 0xFF
+    out[y * stride:(y + 1) * stride] = line
+    prev = line
+  return width, height, out
+
+
+def write_png(path, width, height, pixels):
+  raw = bytearray()
+  stride = width * 4
+  for y in range(height):
+    raw.append(0)
+    raw.extend(pixels[y * stride:(y + 1) * stride])
+
+  def chunk(kind, body):
+    return (struct.pack(">I", len(body)) + kind + body
+            + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+  png = b"\x89PNG\r\n\x1a\n"
+  png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+  png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+  png += chunk(b"IEND", b"")
+  path.write_bytes(png)
+
+
+def hex_color(r, g, b):
+  return "#%02x%02x%02x" % (r, g, b)
+
+
+def px(pixels, width, x, y):
+  i = (y * width + x) * 4
+  return pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]
+
+
+# ------------------------------------------------------------------- build
+
+
+def icon_box(width, height, pixels):
+  """Bounding box of the app icon: everything that is not the page's white."""
+  x0, y0, x1, y1 = width, height, -1, -1
+  for y in range(height):
+    for x in range(width):
+      r, g, b, a = px(pixels, width, x, y)
+      if a > 128 and not (r > 235 and g > 235 and b > 235):
+        x0 = min(x0, x)
+        x1 = max(x1, x)
+        y0 = min(y0, y)
+        y1 = max(y1, y)
+  if x1 < 0:
+    raise SystemExit("no icon found in the logo: every pixel is white")
+  return x0, y0, x1, y1
+
+
+def mark_shapes(width, height, pixels):
+  """The bars the mark is made of, each with the mean colour it is painted in."""
+  mask = bytearray(width * height)
+  for y in range(height):
+    for x in range(width):
+      r, g, b, a = px(pixels, width, x, y)
+      if a > 128 and g > 90 and g > r + 40 and g > b + 40:
+        mask[y * width + x] = 1
+
+  seen = bytearray(width * height)
+  shapes = []
+  for y in range(height):
+    for x in range(width):
+      start = y * width + x
+      if not mask[start] or seen[start]:
+        continue
+      queue = deque([(x, y)])
+      seen[start] = 1
+      min_x = max_x = x
+      min_y = max_y = y
+      count = 0
+      r_sum = g_sum = b_sum = 0
+      while queue:
+        cx, cy = queue.popleft()
+        count += 1
+        r, g, b, _ = px(pixels, width, cx, cy)
+        r_sum += r
+        g_sum += g
+        b_sum += b
+        min_x = min(min_x, cx); max_x = max(max_x, cx)
+        min_y = min(min_y, cy); max_y = max(max_y, cy)
+        for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+          if 0 <= nx < width and 0 <= ny < height and mask[ny * width + nx] and not seen[ny * width + nx]:
+            seen[ny * width + nx] = 1
+            queue.append((nx, ny))
+      shapes.append({
+        "x0": min_x, "y0": min_y, "x1": max_x, "y1": max_y,
+        "mean": (r_sum // count, g_sum // count, b_sum // count),
+      })
+  if not shapes:
+    raise SystemExit("no green mark found in the logo")
+  shapes.sort(key=lambda s: (s["y0"], s["x0"]))
+  return shapes
+
+
+# Breathe: a shape that touches the viewBox edge loses its outermost pixels
+# when Qt rasterizes it small (14px in the bar) through a colorization effect,
+# which shows up as a mark with one side sliced off.
+MARK_INSET = 16
+
+
+def write_mark_svg(shapes, fills, path):
+  xs = [s["x0"] for s in shapes] + [s["x1"] for s in shapes]
+  ys = [s["y0"] for s in shapes] + [s["y1"] for s in shapes]
+  origin_x, origin_y = min(xs) - MARK_INSET, min(ys) - MARK_INSET
+  view_w = max(xs) - origin_x + 1 + MARK_INSET
+  view_h = max(ys) - origin_y + 1 + MARK_INSET
+  parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {view_w} {view_h}">', "  <g>"]
+  for shape, fill in zip(shapes, fills):
+    w = shape["x1"] - shape["x0"] + 1
+    h = shape["y1"] - shape["y0"] + 1
+    parts.append(f'    <rect x="{shape["x0"] - origin_x}" y="{shape["y0"] - origin_y}" '
+                 f'width="{w}" height="{h}" rx="{min(w, h) * 0.22:.1f}" fill="{fill}" />')
+  parts += ["  </g>", "</svg>", ""]
+  path.write_text("\n".join(parts))
+  print(f"{path.name}: {len(shapes)} shapes, {view_w}x{view_h}")
+
+
+def write_icon_png(width, pixels, box, path, target=256):
+  """Box-filter the app icon down, rounding its corners to transparency."""
+  x0, y0, x1, y1 = box
+  icon_w, icon_h = x1 - x0 + 1, y1 - y0 + 1
+  scale = max(1, icon_w // target)
+  out_w, out_h = icon_w // scale, icon_h // scale
+  small = bytearray(out_w * out_h * 4)
+  for y in range(out_h):
+    for x in range(out_w):
+      r = g = b = a = 0
+      for dy in range(scale):
+        for dx in range(scale):
+          sr, sg, sb, sa = px(pixels, width, x0 + x * scale + dx, y0 + y * scale + dy)
+          if sr > 235 and sg > 235 and sb > 235 and sa > 128:
+            continue  # the page's white survives the crop at the corners
+          r += sr; g += sg; b += sb; a += sa
+      n = scale * scale
+      o = (y * out_w + x) * 4
+      small[o] = r // n
+      small[o + 1] = g // n
+      small[o + 2] = b // n
+      small[o + 3] = a // n
+
+  radius = out_h * 0.22
+  for y in range(out_h):
+    for x in range(out_w):
+      cx = min(max(x, radius), out_w - 1 - radius)
+      cy = min(max(y, radius), out_h - 1 - radius)
+      dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+      o = (y * out_w + x) * 4
+      if dist > radius:
+        small[o + 3] = 0
+      elif dist > radius - 1.5:
+        small[o + 3] = int(small[o + 3] * (radius - dist) / 1.5)
+
+  write_png(path, out_w, out_h, small)
+  print(f"{path.name}: {out_w}x{out_h}, {path.stat().st_size} bytes")
+
+
+def build(source: Path, out_dir: Path) -> None:
+  width, height, pixels = read_png(source)
+  print(f"source: {source} ({width}x{height})")
+  out_dir.mkdir(parents=True, exist_ok=True)
+
+  shapes = mark_shapes(width, height, pixels)
+  for shape in shapes:
+    print(f"  {shape['x0']:>4},{shape['y0']:>4} "
+          f"{shape['x1'] - shape['x0'] + 1:>4}x{shape['y1'] - shape['y0'] + 1:<4} "
+          f"{hex_color(*shape['mean'])}")
+
+  write_mark_svg(shapes, [hex_color(*s["mean"]) for s in shapes], out_dir / "dim-mark-color.svg")
+  write_mark_svg(shapes, ["#ffffff"] * len(shapes), out_dir / "dim-mark.svg")
+  write_icon_png(width, pixels, icon_box(width, height, pixels), out_dir / "dim-logo.png")
+
+
+def load_source(source: str) -> Path:
+  """A local file when given, otherwise the published logo, downloaded once."""
+  if source:
+    path = Path(source)
+    if not path.is_file():
+      raise SystemExit(f"no such logo: {path}")
+    return path
+  cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "omarchy-dim"
+  cache = cache_dir / "dim-logo.png"
+  if not cache.is_file():
+    print(f"fetching {LOGO_URL}")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    staged = cache.with_suffix(".part")
+    urllib.request.urlretrieve(LOGO_URL, staged)
+    staged.replace(cache)
+  return cache
+
+
+def main(argv):
+  parser = argparse.ArgumentParser(description="Build the plugin's logo assets from Dim's published logo.")
+  parser.add_argument("--source", default="", metavar="PATH", help="a logo PNG to read instead of downloading")
+  parser.add_argument("--out", default=str(PLUGIN_ROOT / "assets"), metavar="DIR", help="where to write the assets")
+  args = parser.parse_args(argv)
+  build(load_source(args.source), Path(args.out))
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))
