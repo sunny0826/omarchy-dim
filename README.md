@@ -121,7 +121,8 @@ and `--timeout`.
 
 - **Omarchy** with the Quickshell shell (`omarchy version`; developed against
   4.x). The widget is an ordinary `bar-widget` plugin: no first-party files
-  are patched, nothing is installed system-wide, and no `sudo` is ever needed.
+  are patched, nothing is installed system-wide, and no elevated privileges are
+  ever needed.
 - **The Dim CLI**, signed in. It is not in the Arch repositories — install it
   the way Dim ships it (`npm i -g dimcode`, or whatever the project documents),
   then run `dim auth login` once. `omarchy plugin enable` cannot do this for
@@ -177,7 +178,8 @@ development targets.
 - It reads credentials never, and writes nowhere. The credit figures come from
   the CLI; the local-usage figures come from Dim's own database, opened
   **read-only** (and copied to a temporary file if the CLI holds it locked).
-- No `sudo`, no package manager, no systemd, no daemon, no background service.
+- No raised privileges, no package manager, no systemd, no daemon, no
+  background service.
 - The `dimBinary` setting runs whatever path it is given, so only set it to a
   `dim` you trust; leaving it empty lets the collector find the CLI itself.
 
