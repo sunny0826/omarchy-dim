@@ -2,7 +2,7 @@
 """Compose the market listing preview from the harness renders.
 
 `make render` draws the real QML — the bar button and the panel body — into
-~/.cache/guo-dim-check. This puts them together the way the shell shows them:
+~/.cache/omarchy-dim-check. This puts them together the way the shell shows them:
 a bar strip, the popup card below it, on the active theme's colours, and writes
 preview.png at the plugin root.
 
@@ -155,7 +155,7 @@ def compose(bar_path: Path, panel_path: Path, out_path: Path, theme_dir: Path) -
 
 
 def main(argv):
-  cache = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "guo-dim-check"
+  cache = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "omarchy-dim-check"
   state = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
   parser = argparse.ArgumentParser(description="Compose the listing preview from the harness renders.")
   parser.add_argument("--bar", default=str(cache / "bar-mono.png"), metavar="PNG")

@@ -33,9 +33,9 @@ assets:
 	./scripts/build-mark-assets
 
 # Draws the real QML — the bar button in each logo mode, and the panel body —
-# into ~/.cache/guo-dim-check, using a throwaway quickshell instance and live
+# into ~/.cache/omarchy-dim-check, using a throwaway quickshell instance and live
 # data. Needs a running Wayland session. The window it opens is the render.
-RENDER_DIR := $(HOME)/.cache/guo-dim-check
+RENDER_DIR := $(HOME)/.cache/omarchy-dim-check
 render: $(QML_IMPORT_ROOT)/qs
 	mkdir -p $(RENDER_DIR)
 	HARNESS_PLUGIN_DIR=$(CURDIR) HARNESS_OUT=$(RENDER_DIR)/bar- \

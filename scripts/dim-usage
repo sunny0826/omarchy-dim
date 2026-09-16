@@ -429,7 +429,7 @@ def open_usage_db(path: str) -> tuple[sqlite3.Connection | None, str]:
 
   try:
     source = Path(path)
-    temp_dir = Path(tempfile.mkdtemp(prefix="guo-dim-usage-"))
+    temp_dir = Path(tempfile.mkdtemp(prefix="omarchy-dim-usage-"))
     for suffix in ("", "-wal", "-shm"):
       side = Path(str(source) + suffix)
       if side.is_file():

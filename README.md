@@ -167,7 +167,7 @@ omarchy plugin remove sunny0826.dim     # or: omarchy plugin disable sunny0826.d
 `disable` takes the widget out of the bar and leaves the files; `remove`
 deletes the directory as well. Nothing else is written anywhere — the widget
 keeps no state of its own, so there is nothing left to clean up afterwards
-except the optional render cache in `~/.cache/guo-dim-check/`, if you ran the
+except the optional render cache in `~/.cache/omarchy-dim-check/`, if you ran the
 development targets.
 
 ## Security
@@ -215,7 +215,7 @@ omarchy restart shell        # rebuilds every bar widget from the current files
 make test        # node tests for Model.js, python tests for the collector
 make qml-check   # qmllint against the shell's own UI kit
 make probe       # load the real QML against live data and print what it derived
-make render      # draw the real bar button and panel into ~/.cache/guo-dim-check
+make render      # draw the real bar button and panel into ~/.cache/omarchy-dim-check
 make preview     # compose preview.png (the listing image) from those renders
 make assets      # rebuild assets/ from the published logo
 make validate    # manifest schema + all of the above
@@ -235,7 +235,7 @@ touching the running shell:
 - `make probe` prints what the widget derived from a live snapshot — credits,
   the usage database it read, the panel's row counts, alarm state.
 - `make render` draws the real bar button and panel body to
-  `~/.cache/guo-dim-check/*.png`. Add `HARNESS_MARK=Color` (or `Logo`) and
+  `~/.cache/omarchy-dim-check/*.png`. Add `HARNESS_MARK=Color` (or `Logo`) and
   `HARNESS_DISPLAY=Used` to render those variants. Needs a Wayland session;
   the window it opens *is* the render.
 - `make preview` runs both renders and composes [`preview.png`](preview.png)

@@ -181,7 +181,7 @@ class CollectorTestCase(unittest.TestCase):
   """Runs the collector as the widget does: a process, JSON on stdout."""
 
   def setUp(self) -> None:
-    self.temp = tempfile.TemporaryDirectory(prefix="guo-dim-test-")
+    self.temp = tempfile.TemporaryDirectory(prefix="omarchy-dim-test-")
     self.root = Path(self.temp.name)
     self.codex_home = self.root / "codex"
     self.usage_db = self.root / "dimcode.sqlite"
