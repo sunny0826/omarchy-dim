@@ -17,6 +17,7 @@ test-js:
 
 test-python:
 	python3 tests/test_dim_usage.py
+	python3 tests/test_mark_assets.py
 
 # Every QML tool here needs the import root; making it a file target keeps the
 # dependency in one place.
@@ -28,7 +29,7 @@ qml-check: $(QML_IMPORT_ROOT)/qs
 	$(QMLLINT) -I $(QML_IMPORT_ROOT) $(QML_FILES)
 
 # The logo assets are derived, so they can always be rebuilt from the source
-# of truth. Needs the network the first time.
+# of truth. Fetches the current official artwork on every run.
 assets:
 	./scripts/build-mark-assets
 

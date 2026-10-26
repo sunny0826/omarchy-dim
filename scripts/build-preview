@@ -23,8 +23,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
-# The PNG reader/writer and the rounded-corner mask already exist for the logo
-# assets; importing them keeps one implementation of each.
+# Share the PNG reader/writer with the logo asset generator.
 _loader = importlib.machinery.SourceFileLoader("dim_assets", str(PLUGIN_ROOT / "scripts" / "build-mark-assets"))
 _spec = importlib.util.spec_from_loader("dim_assets", _loader)
 assets = importlib.util.module_from_spec(_spec)
