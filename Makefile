@@ -53,7 +53,7 @@ preview: $(QML_IMPORT_ROOT)/qs
 		QML_IMPORT_PATH=$(QML_IMPORT_ROOT) quickshell -p tests/render/grab.qml
 	HARNESS_PLUGIN_DIR=$(CURDIR) HARNESS_OUT=$(RENDER_DIR)/panel.png \
 		QML_IMPORT_PATH=$(QML_IMPORT_ROOT) quickshell -p tests/render/grab-panel.qml
-	./scripts/build-preview
+	./scripts/build-preview --bar $(RENDER_DIR)/bar-mono.png --panel $(RENDER_DIR)/panel.png
 	@echo "wrote preview.png"
 
 # Prints what the widget derives from a live snapshot, without drawing: the

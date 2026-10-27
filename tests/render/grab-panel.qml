@@ -7,6 +7,7 @@ import QtQuick.Window
 // Screen is the Window's attached property, used for the pixel ratio above.
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 
 ShellRoot {
   id: harness
@@ -38,7 +39,7 @@ ShellRoot {
     width: 380 + Style.spacing.popupPadding * 2
     height: 900
     visible: true
-    color: Color.popups.background
+    color: Commons.Color.popups.background
 
     Loader {
       id: bodyLoader
@@ -61,9 +62,9 @@ ShellRoot {
         item.loading = usage.loading
         item.fetchedAtMs = usage.fetchedAtMs
         item.nowMs = Date.now()
-        item.foreground = Color.foreground
-        item.urgentColor = Color.urgent
-        item.trackColor = Style.selectedFillFor(Color.foreground, Color.accent, Color.urgent)
+        item.foreground = Commons.Color.foreground
+        item.urgentColor = Commons.Color.urgent
+        item.trackColor = Style.selectedFillFor(Commons.Color.foreground, Commons.Color.accent, Commons.Color.urgent)
         item.fontFamily = Style.font.family
       }
     }
@@ -78,8 +79,8 @@ ShellRoot {
       var body = bodyLoader.item
       if (!usage || !usage.snapshot || !body) return
       bodyLoader.apply()
-      console.log("theme fg=" + Color.foreground + " bg=" + Color.background + " popups=" + Color.popups.background
-        + " theme=" + Color.currentThemePath)
+      console.log("theme fg=" + Commons.Color.foreground + " bg=" + Commons.Color.background + " popups=" + Commons.Color.popups.background
+        + " theme=" + Commons.Color.currentThemePath)
       var name = Quickshell.env("HARNESS_OUT") || "/tmp/dim-check/panel.png"
       // Grab the whole window at its natural device resolution: asking for an
       // explicit size lands in mixed units and stretches the image.
