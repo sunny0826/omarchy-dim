@@ -20,6 +20,8 @@ jobs:
         run: node tests/test_model.js
       - name: Usage collector (python)
         run: python3 tests/test_dim_usage.py
+      - name: Logo assets (python)
+        run: python3 tests/test_mark_assets.py
       - name: Manifest is valid JSON with the required fields
         run: |
           python3 - <<'PY'

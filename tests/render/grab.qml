@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Window
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 
 ShellRoot {
   id: harness
@@ -23,10 +24,10 @@ ShellRoot {
 
   QtObject {
     id: fakeBar
-    property color foreground: Color.foreground
-    property color background: Color.background
-    property color urgent: Color.urgent
-    property color barForeground: Color.foreground
+    property color foreground: Commons.Color.foreground
+    property color background: Commons.Color.background
+    property color urgent: Commons.Color.urgent
+    property color barForeground: Commons.Color.foreground
     property string fontFamily: Style.font.family
     property bool vertical: false
     property bool foregroundAnimationEnabled: false
@@ -50,7 +51,7 @@ ShellRoot {
     width: 320
     height: 40
     visible: true
-    color: Color.background
+    color: Commons.Color.background
 
     Loader {
       id: panelLoader

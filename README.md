@@ -15,7 +15,7 @@ display — it never spends, changes, or cancels anything.
 The bar shows the Dim logo: the mark in its own green by default, the same
 mark tinted with the theme's foreground, or the full app icon — see
 `barMark` below. Assets live in `assets/` and are generated from the published
-logo, never hand-edited.
+PNG and favicon SVG, never hand-edited.
 
 ## Panel
 
@@ -214,12 +214,12 @@ omarchy restart shell        # rebuilds every bar widget from the current files
 ## Development
 
 ```bash
-make test        # node tests for Model.js, python tests for the collector
+make test        # model, collector, and logo asset tests
 make qml-check   # qmllint against the shell's own UI kit
 make probe       # load the real QML against live data and print what it derived
 make render      # draw the real bar button and panel into ~/.cache/omarchy-dim-check
 make preview     # compose preview.png (the listing image) from those renders
-make assets      # rebuild assets/ from the published logo
+make assets      # fetch current official artwork and rebuild assets/
 make validate    # manifest schema + all of the above
 ```
 
@@ -261,8 +261,17 @@ touching the running shell:
 | `tests/render/` | Throwaway quickshell configs that load the real QML for `make probe` / `make render`. |
 
 Assets are generated, not drawn: `make assets` re-runs the generator, which
-rewrites the three files above with the mark's rectangles and colours measured
-out of the source logo it names. Edit the generator, not the assets.
+fetches the current [app icon](https://dimagent.cn/dim/logo.png) and
+[vector mark](https://dimagent.cn/dimagent-favicon.svg) on every run. The bar
+uses the official path in brand green (from the favicon tile) or white for
+theme tinting. The app icon retains its white artwork and transparency.
+To rebuild offline from saved originals:
+
+```bash
+scripts/build-mark-assets --source logo.png --mark-source dimagent-favicon.svg
+```
+
+Edit the generator, not the generated assets.
 
 ## Credits
 

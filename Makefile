@@ -17,6 +17,7 @@ test-js:
 
 test-python:
 	python3 tests/test_dim_usage.py
+	python3 tests/test_mark_assets.py
 
 # Every QML tool here needs the import root; making it a file target keeps the
 # dependency in one place.
@@ -28,7 +29,7 @@ qml-check: $(QML_IMPORT_ROOT)/qs
 	$(QMLLINT) -I $(QML_IMPORT_ROOT) $(QML_FILES)
 
 # The logo assets are derived, so they can always be rebuilt from the source
-# of truth. Needs the network the first time.
+# of truth. Fetches the current official artwork on every run.
 assets:
 	./scripts/build-mark-assets
 
@@ -52,7 +53,7 @@ preview: $(QML_IMPORT_ROOT)/qs
 		QML_IMPORT_PATH=$(QML_IMPORT_ROOT) quickshell -p tests/render/grab.qml
 	HARNESS_PLUGIN_DIR=$(CURDIR) HARNESS_OUT=$(RENDER_DIR)/panel.png \
 		QML_IMPORT_PATH=$(QML_IMPORT_ROOT) quickshell -p tests/render/grab-panel.qml
-	./scripts/build-preview
+	./scripts/build-preview --bar $(RENDER_DIR)/bar-mono.png --panel $(RENDER_DIR)/panel.png
 	@echo "wrote preview.png"
 
 # Prints what the widget derives from a live snapshot, without drawing: the
